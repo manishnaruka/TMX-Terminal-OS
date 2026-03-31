@@ -1,6 +1,5 @@
-﻿using Microsoft.Win32;
+using Microsoft.Win32;
 using System;
-using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Diagnostics;
@@ -40,23 +39,23 @@ namespace TMXWinTerminal.ViewModels
             _sshCommandBuilder = sshCommandBuilder;
             _terminalLauncher = terminalLauncher;
             _settings = _settingsRepository.Load();
+            ApplyCompactLayoutDefaults();
 
             Entries = new ObservableCollection<ConnectionEntry>(_connectionRepository.Load());
             EntriesView = CollectionViewSource.GetDefaultView(Entries);
             EntriesView.SortDescriptions.Add(new SortDescription(nameof(ConnectionEntry.Name), ListSortDirection.Ascending));
             EntriesView.Filter = FilterEntry;
 
-            TerminalPreferences = Enum.GetValues(typeof(TerminalPreference)).Cast<TerminalPreference>().ToList();
-
-            NewCommand = new RelayCommand(CreateNewEntry);
-            SaveCommand = new RelayCommand(SaveCurrentEntry, () => CurrentEntry != null);
+            NewCommand = new RelayCommand(RequestNewEntry);
+            EditCommand = new RelayCommand(RequestEditSelectedEntry, () => SelectedEntry != null);
             DeleteCommand = new RelayCommand(DeleteSelectedEntry, () => SelectedEntry != null);
             DuplicateCommand = new RelayCommand(DuplicateSelectedEntry, () => SelectedEntry != null);
-            ConnectCommand = new RelayCommand(ConnectCurrentEntry, () => CurrentEntry != null);
+            ConnectCommand = new RelayCommand(ConnectCurrentEntry, () => SelectedEntry != null);
             BrowsePemCommand = new RelayCommand(BrowsePemFile, () => CurrentEntry != null);
             GenerateCommand = new RelayCommand(GenerateSshCommand, () => CurrentEntry != null);
-            CopyCommand = new RelayCommand(CopyResolvedCommand, () => CurrentEntry != null);
+            CopyCommand = new RelayCommand(CopyResolvedCommand, () => SelectedEntry != null);
             OpenPemFolderCommand = new RelayCommand(OpenPemFolder, () => CurrentEntry != null && !string.IsNullOrWhiteSpace(CurrentEntry.PemFilePath));
+            ToggleThemeCommand = new RelayCommand(ToggleTheme);
 
             if (Entries.Count > 0)
             {
@@ -65,21 +64,21 @@ namespace TMXWinTerminal.ViewModels
             }
             else
             {
-                CreateNewEntry();
+                CurrentEntry = ConnectionEntry.CreateEmpty();
             }
 
             StatusMessage = "Ready.";
         }
 
+        public event Action<ConnectionEntry, bool> EditEntryRequested;
+
         public ObservableCollection<ConnectionEntry> Entries { get; }
 
         public ICollectionView EntriesView { get; }
 
-        public IList<TerminalPreference> TerminalPreferences { get; }
-
         public ICommand NewCommand { get; }
 
-        public ICommand SaveCommand { get; }
+        public ICommand EditCommand { get; }
 
         public ICommand DeleteCommand { get; }
 
@@ -95,6 +94,8 @@ namespace TMXWinTerminal.ViewModels
 
         public ICommand OpenPemFolderCommand { get; }
 
+        public ICommand ToggleThemeCommand { get; }
+
         public ConnectionEntry SelectedEntry
         {
             get => _selectedEntry;
@@ -107,6 +108,7 @@ namespace TMXWinTerminal.ViewModels
 
                 _settings.LastSelectedEntryId = value?.Id ?? string.Empty;
                 LoadCurrentEntryFromSelection();
+                OnPropertyChanged(nameof(SelectionHint));
                 CommandManager.InvalidateRequerySuggested();
             }
         }
@@ -152,20 +154,27 @@ namespace TMXWinTerminal.ViewModels
             set => SetProperty(ref _statusMessage, value);
         }
 
-        public TerminalPreference SelectedTerminalPreference
+        public string SelectionHint => SelectedEntry == null
+            ? "Choose a saved connection or click New to add one."
+            : "Double-click to connect, or click Edit to update this SSH entry.";
+
+        public ThemeMode SelectedThemeMode
         {
-            get => _settings.TerminalPreference;
-            set
+            get => _settings.ThemeMode;
+            private set
             {
-                if (_settings.TerminalPreference != value)
+                if (_settings.ThemeMode != value)
                 {
-                    _settings.TerminalPreference = value;
+                    _settings.ThemeMode = value;
                     OnPropertyChanged();
+                    OnPropertyChanged(nameof(ThemeLabel));
+                    ThemeManager.ApplyTheme(value);
                     PersistSettings();
-                    StatusMessage = value == TerminalPreference.Auto ? "Terminal preference set to Auto." : "Terminal preference saved.";
                 }
             }
         }
+
+        public string ThemeLabel => _settings.ThemeMode == ThemeMode.Dark ? "☀ Light" : "☽ Dark";
 
         public string ResolvedCommandPreview => _sshCommandBuilder.Build(CurrentEntry);
 
@@ -196,6 +205,45 @@ namespace TMXWinTerminal.ViewModels
         {
             PersistConnections();
             PersistSettings();
+        }
+
+        public bool TrySaveEditedEntry(ConnectionEntry entry)
+        {
+            var outcome = _validationService.ValidateForSave(entry);
+            if (outcome.HasErrors)
+            {
+                MessageBox.Show(string.Join(Environment.NewLine, outcome.Errors), "Validation Error", MessageBoxButton.OK, MessageBoxImage.Warning);
+                StatusMessage = "Fix validation errors before saving.";
+                return false;
+            }
+
+            var warningMessage = outcome.Warnings.Count > 0 ? string.Join(" ", outcome.Warnings) : string.Empty;
+            var now = DateTime.UtcNow;
+            var candidate = entry?.Clone() ?? ConnectionEntry.CreateEmpty();
+            var existing = Entries.FirstOrDefault(item => !string.IsNullOrWhiteSpace(item.Id) && item.Id == candidate.Id);
+
+            if (existing != null)
+            {
+                candidate.CreatedAt = existing.CreatedAt == default(DateTime) ? now : existing.CreatedAt;
+                candidate.UpdatedAt = now;
+                existing.CopyFrom(candidate);
+                SelectedEntry = existing;
+            }
+            else
+            {
+                candidate.Id = string.IsNullOrWhiteSpace(candidate.Id) ? Guid.NewGuid().ToString("N") : candidate.Id;
+                candidate.CreatedAt = candidate.CreatedAt == default(DateTime) ? now : candidate.CreatedAt;
+                candidate.UpdatedAt = now;
+                Entries.Add(candidate);
+                SelectedEntry = candidate;
+            }
+
+            PersistConnections();
+            EntriesView.Refresh();
+            StatusMessage = string.IsNullOrWhiteSpace(warningMessage)
+                ? "Saved connection entry."
+                : "Saved connection entry. " + warningMessage;
+            return true;
         }
 
         private void CurrentEntryOnPropertyChanged(object sender, PropertyChangedEventArgs e)
@@ -235,51 +283,21 @@ namespace TMXWinTerminal.ViewModels
             CurrentEntry = SelectedEntry != null ? SelectedEntry.Clone() : ConnectionEntry.CreateEmpty();
         }
 
-        private void CreateNewEntry()
+        private void RequestNewEntry()
         {
-            SelectedEntry = null;
-            CurrentEntry = ConnectionEntry.CreateEmpty();
-            StatusMessage = "Creating a new connection entry.";
+            StatusMessage = "Opening the new connection form.";
+            EditEntryRequested?.Invoke(ConnectionEntry.CreateEmpty(), true);
         }
 
-        private void SaveCurrentEntry()
+        private void RequestEditSelectedEntry()
         {
-            var outcome = _validationService.ValidateForSave(CurrentEntry);
-            if (outcome.HasErrors)
+            if (SelectedEntry == null)
             {
-                MessageBox.Show(string.Join(Environment.NewLine, outcome.Errors), "Validation Error", MessageBoxButton.OK, MessageBoxImage.Warning);
-                StatusMessage = "Fix validation errors before saving.";
                 return;
             }
 
-            if (outcome.Warnings.Count > 0)
-            {
-                StatusMessage = string.Join(" ", outcome.Warnings);
-            }
-
-            var now = DateTime.UtcNow;
-            ConnectionEntry target;
-            if (SelectedEntry != null && !string.IsNullOrWhiteSpace(SelectedEntry.Id) && SelectedEntry.Id == CurrentEntry.Id)
-            {
-                target = SelectedEntry;
-                var createdAt = SelectedEntry.CreatedAt == default(DateTime) ? now : SelectedEntry.CreatedAt;
-                CurrentEntry.CreatedAt = createdAt;
-                CurrentEntry.UpdatedAt = now;
-                target.CopyFrom(CurrentEntry.Clone());
-            }
-            else
-            {
-                target = CurrentEntry.Clone();
-                target.Id = string.IsNullOrWhiteSpace(target.Id) ? Guid.NewGuid().ToString("N") : target.Id;
-                target.CreatedAt = target.CreatedAt == default(DateTime) ? now : target.CreatedAt;
-                target.UpdatedAt = now;
-                Entries.Add(target);
-            }
-
-            PersistConnections();
-            SelectedEntry = target;
-            EntriesView.Refresh();
-            StatusMessage = "Saved connection entry.";
+            StatusMessage = "Opening the selected connection.";
+            EditEntryRequested?.Invoke(SelectedEntry.Clone(), false);
         }
 
         private void DeleteSelectedEntry()
@@ -301,7 +319,8 @@ namespace TMXWinTerminal.ViewModels
 
             if (Entries.Count == 0)
             {
-                CreateNewEntry();
+                SelectedEntry = null;
+                CurrentEntry = ConnectionEntry.CreateEmpty();
             }
             else
             {
@@ -344,7 +363,7 @@ namespace TMXWinTerminal.ViewModels
                 MessageBox.Show(string.Join(Environment.NewLine, outcome.Warnings), "Connection Warning", MessageBoxButton.OK, MessageBoxImage.Information);
             }
 
-            var launchResult = _terminalLauncher.Launch(CurrentEntry, SelectedTerminalPreference);
+            var launchResult = _terminalLauncher.Launch(CurrentEntry, TerminalPreference.WindowsTerminal);
             if (!launchResult.Success)
             {
                 MessageBox.Show(launchResult.Message, "Launch Failed", MessageBoxButton.OK, MessageBoxImage.Error);
@@ -429,6 +448,12 @@ namespace TMXWinTerminal.ViewModels
             StatusMessage = "Opened the key file location in Explorer.";
         }
 
+        private void ToggleTheme()
+        {
+            SelectedThemeMode = _settings.ThemeMode == ThemeMode.Dark ? ThemeMode.Light : ThemeMode.Dark;
+            StatusMessage = "Switched to " + _settings.ThemeMode + " theme.";
+        }
+
         private void PersistConnections()
         {
             _connectionRepository.Save(Entries);
@@ -438,7 +463,22 @@ namespace TMXWinTerminal.ViewModels
         {
             _settingsRepository.Save(_settings);
         }
+
+        private void ApplyCompactLayoutDefaults()
+        {
+            if (_settings.HasAppliedCompactLayoutDefaults)
+            {
+                return;
+            }
+
+            _settings.HasAppliedCompactLayoutDefaults = true;
+            if (!_settings.IsWindowMaximized && (_settings.WindowWidth > 980 || _settings.WindowHeight > 720))
+            {
+                _settings.WindowWidth = 920;
+                _settings.WindowHeight = 680;
+            }
+
+            PersistSettings();
+        }
     }
 }
-
-

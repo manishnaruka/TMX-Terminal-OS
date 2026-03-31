@@ -116,9 +116,21 @@ namespace TMXWinTerminal.Services
         {
             try
             {
+                if (!IsWindowsTerminalAvailable())
+                {
+                    error = "Windows Terminal (wt.exe) is not installed.";
+                    return false;
+                }
+
+                if (!File.Exists(scriptPath))
+                {
+                    error = "Launch script was not found at: " + scriptPath;
+                    return false;
+                }
+
                 var title = string.IsNullOrWhiteSpace(entry?.Name) ? "TMXWinTerminal" : "TMXWinTerminal - " + entry.Name.Trim();
                 var powerShellPath = GetPowerShellExecutablePath();
-                var args = "new-window --title " + QuoteArgument(title) + " " + QuoteArgument(powerShellPath) + " -NoExit -ExecutionPolicy Bypass -File " + QuoteArgument(scriptPath);
+                var args = "-w new new-tab --title " + QuoteArgument(title) + " " + QuoteArgument(powerShellPath) + " -NoExit -ExecutionPolicy Bypass -File " + QuoteArgument(scriptPath);
                 var startInfo = new ProcessStartInfo
                 {
                     FileName = GetWindowsTerminalExecutablePath(),
