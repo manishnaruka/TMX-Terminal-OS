@@ -8,6 +8,7 @@
     <OutputType>WinExe</OutputType>
     <RootNamespace>TMXWinTerminal</RootNamespace>
     <AssemblyName>TMXWinTerminal</AssemblyName>
+    <ApplicationIcon>Assets\tmx-logo.ico</ApplicationIcon>
     <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
     <FileAlignment>512</FileAlignment>
     <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
@@ -103,6 +104,7 @@
       <DesignTime>True</DesignTime>
     </Compile>
     <None Include="app.manifest" />
+    <None Include="Assets\tmx-logo.ico" />
     <Resource Include="Assets\tmx-logo.png" />
     <Page Include="Themes\DarkTheme.xaml">
       <Generator>MSBuild:Compile</Generator>
